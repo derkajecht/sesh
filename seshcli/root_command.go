@@ -31,6 +31,7 @@ func NewRootCommand(version string) *cobra.Command {
 		NewWindowCommand(base),
 		NewDashboardCommand(base),
 		NewWorktreeCommand(base),
+		NewHarpoonCommand(base),
 	)
 
 	return rootCmd

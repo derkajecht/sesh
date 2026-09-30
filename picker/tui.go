@@ -92,6 +92,15 @@ type aliasAutoConnectMsg struct {
 	alias string
 }
 
+// harpoonAddedMsg carries the result of pinning the highlighted session back to
+// Update. position is the index slot the session landed in, used verbatim
+// in the status so the picker never has to re-read the harpoon list.
+type harpoonAddedMsg struct {
+	name     string
+	position int
+	err      error
+}
+
 // Alias is a picker shortcut for a single session, derived from an
 // [[session]] config block.
 type Alias struct {
@@ -153,6 +162,12 @@ type Options struct {
 	// Remove drops an entry from the frecency backend. Nil leaves ctrl+x
 	// inert.
 	Remove RemoveFunc
+	// HarpoonAdd pins a session into the ordered harpoon list. Nil leaves the
+	// pin key inert and the picker reports harpoon is unavailable.
+	HarpoonAdd HarpoonAddFunc
+	// HarpoonList reads the occupied harpoon slots so the pin prompt can show
+	// which positions are free. Nil omits occupancy from the prompt.
+	HarpoonList HarpoonListFunc
 }
 
 type Model struct {
@@ -204,6 +219,22 @@ type Model struct {
 	removeFunc RemoveFunc
 	confirm    *confirmState
 	status     string
+
+	// harpoonAdd pins the highlighted session into the ordered harpoon list.
+	// Nil leaves the pin key inert.
+	harpoonAdd HarpoonAddFunc
+	// harpoonList reads the occupied slots on entering pin mode; nil means the
+	// prompt can't show occupancy.
+	harpoonList HarpoonListFunc
+	// pinning is true while the two-step pin is waiting for a slot digit.
+	// pinName is the session chosen by ctrl+g, pinSlots the occupancy snapshot
+	// taken then, pinSlotsLoaded whether that snapshot is trustworthy, and
+	// pinRebound the name the chosen slot already held (empty for a fresh pin).
+	pinning        bool
+	pinName        string
+	pinSlots       []HarpoonSlot
+	pinSlotsLoaded bool
+	pinRebound     string
 
 	previewFunc     PreviewFunc
 	previewOn       bool
@@ -412,6 +443,8 @@ func New(fetchFunc FetchFunc, opts Options) Model {
 		aliasAutoConnectDelay:   opts.AliasAutoConnectDelay,
 		disableAliasAutoConnect: opts.DisableAliasAutoConnect,
 		removeFunc:              opts.Remove,
+		harpoonAdd:              opts.HarpoonAdd,
+		harpoonList:             opts.HarpoonList,
 		previewFunc:             opts.PreviewFunc,
 		previewOn:               opts.Preview,
 		previewWidthPct:         previewWidth(opts.PreviewWidth),
@@ -451,6 +484,128 @@ func (m Model) highlightedName() (string, bool) {
 		return "", false
 	}
 	return m.filtered[m.cursor].item.name, true
+}
+
+// pinSlotCount is how many positions the pin prompt offers. Single digits, so
+// it is also the highest slot a keypress can reach.
+const pinSlotCount = 9
+
+// startHarpoon handles ctrl+g: it enters pin mode for the highlighted session
+// and shows which slots are occupied, or explains why it can't.
+func (m Model) startHarpoon() (tea.Model, tea.Cmd) {
+	if m.harpoonAdd == nil {
+		m.status = "harpoon is unavailable"
+		return m, nil
+	}
+	name, ok := m.highlightedName()
+	if !ok {
+		m.status = "nothing to pin"
+		return m, nil
+	}
+	m.pinning = true
+	m.pinName = name
+	m.pinSlots = nil
+	m.pinSlotsLoaded = false
+	m.pinRebound = ""
+	if m.harpoonList != nil {
+		if slots, err := m.harpoonList(); err == nil {
+			m.pinSlots = slots
+			m.pinSlotsLoaded = true
+		}
+	}
+	m.status = m.pinPrompt()
+	return m, nil
+}
+
+// pinPrompt builds the one-line occupancy status shown while pin mode is
+// waiting for a slot. Occupied slots carry their session name, vacant ones a
+// dash, so the choice isn't made blind.
+func (m Model) pinPrompt() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "pin %q", m.pinName)
+	if m.pinSlotsLoaded {
+		occupied := make(map[int]string, len(m.pinSlots))
+		for _, slot := range m.pinSlots {
+			occupied[slot.Position] = slot.Name
+		}
+		for i := 1; i <= pinSlotCount; i++ {
+			if name, ok := occupied[i]; ok {
+				fmt.Fprintf(&b, " [%d]%s", i, name)
+			} else {
+				fmt.Fprintf(&b, " [%d]", i)
+			}
+		}
+	}
+	return b.String()
+}
+
+// updatePin handles a keypress while pin mode is active. done reports whether
+// the key belonged to the mode; when it is false the mode has been cancelled
+// and the key is left for normal handling, so typing is never swallowed.
+func (m *Model) updatePin(msg tea.KeyPressMsg) (cmd tea.Cmd, done bool) {
+	key := msg.String()
+	switch {
+	case key == "esc", key == "ctrl+c", key == "enter":
+		// esc and ctrl+c mean "get me out of here"
+		m.cancelPin("")
+		return nil, true
+	case len(key) == 1 && key[0] >= '1' && key[0] <= '9':
+		return m.pinToSlot(int(key[0] - '0')), true
+	case len(key) == 1 && key[0] >= '0' && key[0] <= '9':
+		// A digit outside the offered range: say so and keep waiting.
+		m.status = m.pinPrompt() + " 1-9"
+		return nil, true
+	default:
+		m.clearPin()
+		return nil, false
+	}
+}
+
+// pinToSlot commits the pending pin to pos, remembering what it displaced so
+// the result can word a re-pin differently from a fresh one.
+func (m *Model) pinToSlot(pos int) tea.Cmd {
+	for _, slot := range m.pinSlots {
+		if slot.Position == pos {
+			m.pinRebound = slot.Name
+			break
+		}
+	}
+	name := m.pinName
+	m.pinning = false
+	m.pinName = ""
+	m.pinSlots = nil
+	m.pinSlotsLoaded = false
+	return m.addHarpoon(name, pos)
+}
+
+// cancelPin leaves pin mode with a status explaining why.
+func (m *Model) cancelPin(status string) {
+	m.clearPin()
+	m.status = status
+}
+
+// clearPin drops every trace of pin mode, leaving status alone.
+func (m *Model) clearPin() {
+	m.pinning = false
+	m.pinName = ""
+	m.pinSlots = nil
+	m.pinSlotsLoaded = false
+}
+
+// addHarpoon runs the pin off the event loop: the backend may shell out or
+// touch a file, and blocking Update on it would freeze the picker.
+func (m Model) addHarpoon(name string, pos int) tea.Cmd {
+	harpoonAdd := m.harpoonAdd
+	return func() tea.Msg {
+		position, err := harpoonAdd(name, pos)
+		return harpoonAddedMsg{name: name, position: position, err: err}
+	}
+}
+
+// harpoonFailed is the status shown when the backend refuses a pin. The
+// session is not in the list, so the message has to say the pin didn't take.
+func harpoonFailed(err error) string {
+	return fmt.Sprintf("Couldn't pin entry: %v", err)
 }
 
 // schedulePreview arms a debounced fetch for the highlighted session, and
@@ -539,6 +694,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dropItem(msg.name, msg.path)
 		return m, m.schedulePreview()
 
+	case harpoonAddedMsg:
+		rebound := m.pinRebound
+		m.pinRebound = ""
+		if msg.err != nil {
+			// The session was not pinned, so saying nothing would read as a
+			// pin that worked.
+			m.status = harpoonFailed(msg.err)
+			return m, nil
+		}
+		if rebound != "" {
+			// The chosen slot held someone else, so the wording has to say the
+			// old binding was displaced rather than that slot was empty.
+			m.status = fmt.Sprintf("rebound slot %d: %q -> %q", msg.position, rebound, msg.name)
+			return m, nil
+		}
+		m.status = fmt.Sprintf("pinned %q to slot %d", msg.name, msg.position)
+		return m, nil
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -550,6 +723,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// filter input behind it.
 		if m.confirm != nil {
 			return m.updateConfirm(msg)
+		}
+		// Pin mode owns the digits and the mode keys; a key it doesn't claim
+		// cancels the mode and falls through to normal handling, so typing is
+		// never swallowed.
+		if m.pinning {
+			if cmd, done := m.updatePin(msg); done {
+				return m, cmd
+			}
 		}
 		// A status message answers the previous keypress, so the next one
 		// retires it.
@@ -588,6 +769,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "ctrl+x":
 			return m.startRemove()
+
+		case "ctrl+g":
+			// Harpoon pin. ctrl+g is free everywhere else in the picker: it is
+			return m.startHarpoon()
 
 		case "ctrl+o":
 			// Toggling stays allowed on a narrow terminal: the pane is gated on

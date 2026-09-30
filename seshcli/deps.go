@@ -17,6 +17,7 @@ import (
 	"github.com/joshmedeski/sesh/v2/focuser"
 	"github.com/joshmedeski/sesh/v2/git"
 	"github.com/joshmedeski/sesh/v2/github"
+	"github.com/joshmedeski/sesh/v2/harpoon"
 	"github.com/joshmedeski/sesh/v2/home"
 	"github.com/joshmedeski/sesh/v2/icon"
 	"github.com/joshmedeski/sesh/v2/json"
@@ -155,7 +156,20 @@ func (b *BaseDeps) BuildAll(configPath string) (*Deps, error) {
 	if cachedLi != nil {
 		refreshCache = func() { cachedLi.RefreshCache(lister.ListOptions{}) }
 	}
-	pk := picker.NewPicker(config, p, b.Home, usedLister, b.Zoxide, refreshCache)
+	harpoonStore := harpoon.NewHarpoon(t)
+	harpoonAdd := func(name string, pos int) (int, error) { return harpoonStore.Add(name, pos) }
+	harpoonList := func() ([]picker.HarpoonSlot, error) {
+		slots, err := harpoonStore.List()
+		if err != nil {
+			return nil, err
+		}
+		out := make([]picker.HarpoonSlot, 0, len(slots))
+		for _, s := range slots {
+			out = append(out, picker.HarpoonSlot{Position: s.Position, Name: s.Name})
+		}
+		return out, nil
+	}
+	pk := picker.NewPicker(config, p, b.Home, usedLister, b.Zoxide, refreshCache, harpoonAdd, harpoonList)
 	mk := mkdirer.NewMkdirer(b.Os, b.Home, c)
 
 	return &Deps{

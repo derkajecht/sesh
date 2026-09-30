@@ -28,6 +28,8 @@ type Tmux interface {
 	ResolveClient() string
 	SwitchClientTarget(client string, targetSession string) (string, error)
 	RenameSession(target string, newName string) (string, error)
+	GetOption(name string) (string, error)
+	SetOption(name string, value string) (string, error)
 }
 
 type RealTmux struct {
@@ -78,4 +80,20 @@ func (t *RealTmux) KillSession(session string) (string, error) {
 
 func (t *RealTmux) SwitchClientTarget(client string, targetSession string) (string, error) {
 	return t.shell.Cmd(t.bin, "switch-client", "-c", client, "-t", targetSession)
+}
+
+// GetOption reads a tmux global user option. A missing option is not an error:
+// `show-options -q` exits 0 with empty output, and shell.Cmd already maps the
+// "no server running" failure to ("", nil), so callers get an empty string
+// whenever the option or the whole server is absent.
+func (t *RealTmux) GetOption(name string) (string, error) {
+	return t.shell.Cmd(t.bin, "show-options", "-g", "-v", "-q", name)
+}
+
+// SetOption replaces a tmux global user option. Passing an empty value clears
+// it, matching `set-option -u`. Use this (not `set-option -a`) for list values:
+// tmux's append concatenates with no separator, so rebuilding the whole value
+// with replace semantics is the only way to keep entries distinct.
+func (t *RealTmux) SetOption(name string, value string) (string, error) {
+	return t.shell.Cmd(t.bin, "set-option", "-g", name, value)
 }

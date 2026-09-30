@@ -63,6 +63,13 @@ type RealPicker struct {
 	// refreshCache refetches the session list into the cache after a removal.
 	// Nil when caching is off, which is also when there is nothing to refresh.
 	refreshCache CacheRefreshFunc
+	// harpoonAdd pins a session into the ordered harpoon list, returning its
+	// 1-indexed position. Nil leaves the pin key inert.
+	harpoonAdd HarpoonAddFunc
+	// harpoonList reads the currently occupied harpoon slots so the pin prompt
+	// can show which positions are free. Nil means the prompt omits occupancy
+	// rather than failing.
+	harpoonList HarpoonListFunc
 }
 
 // CacheRefreshFunc rewrites the session cache from live data. The picker calls
@@ -71,7 +78,25 @@ type RealPicker struct {
 // forgotten until the entry aged out on its own.
 type CacheRefreshFunc func()
 
-func NewPicker(config model.Config, previewer previewer.Previewer, home home.Home, wildcards WildcardFinder, zoxide zoxide.Zoxide, refreshCache CacheRefreshFunc) Picker {
+// HarpoonAddFunc pins a session into the ordered harpoon list and returns the
+// indexed position it landed at. The picker calls it for the highlighted row
+// and reports the position back without re-reading the list.
+type HarpoonAddFunc func(name string, pos int) (int, error)
+
+// HarpoonSlot is one occupied harpoon position. Vacant slots are simply absent
+// from the list, so a position with any other value is free.
+type HarpoonSlot struct {
+	Position int
+	Name     string
+}
+
+// HarpoonListFunc returns the occupied harpoon slots, used only to show which
+// positions the pin prompt can offer.
+type HarpoonListFunc func() ([]HarpoonSlot, error)
+
+func NewPicker(config model.Config, previewer previewer.Previewer, home home.Home,
+	wildcards WildcardFinder, zoxide zoxide.Zoxide, refreshCache CacheRefreshFunc,
+	harpoonAdd HarpoonAddFunc, harpoonList HarpoonListFunc) Picker {
 	return &RealPicker{
 		config:       config,
 		previewer:    previewer,
@@ -79,6 +104,8 @@ func NewPicker(config model.Config, previewer previewer.Previewer, home home.Hom
 		wildcards:    wildcards,
 		zoxide:       zoxide,
 		refreshCache: refreshCache,
+		harpoonAdd:   harpoonAdd,
+		harpoonList:  harpoonList,
 	}
 }
 
@@ -253,6 +280,8 @@ func (p *RealPicker) Pick(fetchFunc FetchFunc, opts PickerOptions) (string, erro
 		PreviewFunc:             previewFunc,
 		GroupSeparator:          p.config.TUI.GroupSeparator,
 		Remove:                  removeFunc,
+		HarpoonAdd:              p.harpoonAdd,
+		HarpoonList:             p.harpoonList,
 	})
 	prog := tea.NewProgram(m)
 	result, err := prog.Run()
