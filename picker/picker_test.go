@@ -2171,3 +2171,324 @@ func TestGroupSeparator_ScrollCountsTheRule(t *testing.T) {
 	lines := strings.Split(ansi.Strip(m.View().Content), "\n")
 	assert.Contains(t, lines[len(lines)-1], "rails-app")
 }
+
+// --- harpoon pin ------------------------------------------------------------
+
+// ctrlG is the harpoon pin binding as the terminal delivers it.
+var ctrlG = tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl}
+
+// newHarpoonModel loads the test sessions with the given pin and list funcs
+// wired in. Either may be nil to model a picker built without that half.
+func newHarpoonModel(add HarpoonAddFunc, list HarpoonListFunc) Model {
+	sessions := testSessions()
+	m := New(testFetchFunc(sessions), testOptionsWith(func(o *Options) {
+		o.HarpoonAdd = add
+		o.HarpoonList = list
+	}))
+	result, _ := m.Update(sessionsLoadedMsg{sessions: sessions})
+	return result.(Model)
+}
+
+// pinSlotKey is a slot digit as the terminal delivers it.
+func pinSlotKey(digit rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: digit, Text: string(digit)}
+}
+
+// occupancySlots is a small occupied-slot list used across the pin tests.
+func occupancySlots() ([]HarpoonSlot, error) {
+	return []HarpoonSlot{{Position: 1, Name: "alpha"}, {Position: 3, Name: "gamma"}}, nil
+}
+
+func TestCtrlG_EntersPinModeWithoutPinning(t *testing.T) {
+	pinned := false
+	m := newHarpoonModel(func(string, int) (int, error) {
+		pinned = true
+		return 0, nil
+	}, occupancySlots)
+
+	result, cmd := m.Update(ctrlG)
+	m = result.(Model)
+
+	assert.Nil(t, cmd, "ctrl+g must not pin on its own: the slot is chosen next")
+	assert.False(t, pinned, "no slot is chosen yet, so nothing is written")
+	assert.True(t, m.pinning)
+	assert.Equal(t, "my-project", m.pinName)
+	assert.Contains(t, m.status, `pin "my-project"`)
+	assert.False(t, m.quit)
+}
+
+func TestCtrlG_OccupancyLineShowsOccupiedAndVacantSlots(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 0, nil }, occupancySlots)
+
+	m = press(m, ctrlG)
+
+	require.True(t, m.pinning)
+	assert.Contains(t, m.status, "[1]alpha")
+	assert.Contains(t, m.status, "[3]gamma")
+	// A vacant slot renders bare, with no name after the number. Occupied slots
+	// carry their session name, so the absence of one marks the vacancy.
+	assert.Contains(t, m.status, "[2] [3]gamma")
+	assert.True(t, strings.HasSuffix(m.status, "[9]"), "the offered range reaches the ninth slot")
+}
+
+func TestCtrlG_DigitPinsHighlightedSessionAtChosenSlot(t *testing.T) {
+	type call struct {
+		name string
+		pos  int
+	}
+	var calls []call
+	m := newHarpoonModel(func(name string, pos int) (int, error) {
+		calls = append(calls, call{name, pos})
+		return pos, nil
+	}, occupancySlots)
+	m.cursor = 1 // dotfiles
+
+	m = press(m, ctrlG)
+	require.True(t, m.pinning)
+
+	result, cmd := m.Update(pinSlotKey('2'))
+	m = result.(Model)
+	require.NotNil(t, cmd, "the pin should run asynchronously")
+	assert.False(t, m.pinning, "choosing a slot leaves pin mode")
+
+	m = press(m, cmd())
+
+	require.Len(t, calls, 1)
+	assert.Equal(t, "dotfiles", calls[0].name)
+	assert.Equal(t, 2, calls[0].pos, "the chosen digit is the position handed to the backend")
+	assert.Contains(t, m.status, `pinned "dotfiles" to slot 2`)
+}
+
+func TestCtrlG_FreshSlotUsesPinnedWording(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 4, nil }, occupancySlots)
+	m = press(m, ctrlG)
+
+	result, cmd := m.Update(pinSlotKey('4'))
+	m = result.(Model)
+	require.NotNil(t, cmd)
+	m = press(m, cmd())
+
+	assert.Contains(t, m.status, `pinned "my-project" to slot 4`)
+	assert.NotContains(t, m.status, "rebound")
+}
+
+func TestCtrlG_ReboundSlotUsesReboundWording(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 3, nil }, occupancySlots)
+	m = press(m, ctrlG)
+
+	result, cmd := m.Update(pinSlotKey('3'))
+	m = result.(Model)
+	require.NotNil(t, cmd)
+	m = press(m, cmd())
+
+	assert.Contains(t, m.status, `rebound slot 3: "gamma" -> "my-project"`,
+		"re-pinning over an occupied slot must name what it displaced")
+}
+
+func TestCtrlG_LeavesSelectionAndFilterUnchanged(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 2, nil }, nil)
+	m.filterInput.SetValue("dot")
+	m.applyFilter()
+	m.cursor = 0
+	filterBefore := m.filterInput.Value()
+	cursorBefore := m.cursor
+
+	m = press(m, ctrlG)
+	result, cmd := m.Update(pinSlotKey('2'))
+	m = result.(Model)
+	require.NotNil(t, cmd)
+	m = press(m, cmd())
+
+	assert.Equal(t, filterBefore, m.filterInput.Value(), "the pin must not touch the filter")
+	assert.Equal(t, cursorBefore, m.cursor, "the pin must not move the selection")
+	assert.Equal(t, "", m.chosen, "the pin must not select anything")
+	assert.False(t, m.quit, "the pin must not quit the picker")
+}
+
+func TestCtrlG_NilHarpoonAddIsUnavailable(t *testing.T) {
+	m := newHarpoonModel(nil, occupancySlots)
+
+	result, cmd := m.Update(ctrlG)
+	m = result.(Model)
+
+	assert.Nil(t, cmd, "an unavailable pin should schedule nothing")
+	assert.Equal(t, "harpoon is unavailable", m.status)
+	assert.False(t, m.pinning, "an unavailable pin never enters pin mode")
+	assert.Equal(t, "", m.filterInput.Value())
+	assert.False(t, m.quit)
+}
+
+func TestCtrlG_NilHarpoonListStillPinsWithoutOccupancy(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 5, nil }, nil)
+
+	m = press(m, ctrlG)
+	require.True(t, m.pinning, "pin mode works without a list to read")
+	assert.Contains(t, m.status, `pin "my-project"`)
+	assert.NotContains(t, m.status, "->", "occupancy is omitted rather than invented")
+
+	result, cmd := m.Update(pinSlotKey('5'))
+	m = result.(Model)
+	require.NotNil(t, cmd)
+	m = press(m, cmd())
+
+	assert.Contains(t, m.status, `pinned "my-project" to slot 5`)
+}
+
+func TestCtrlG_OccupancySurvivesTheNextKeypress(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 0, nil }, occupancySlots)
+	m = press(m, ctrlG)
+	require.Contains(t, m.status, "[1]alpha")
+
+	// The next keypress clears status at the top of Update, so pin mode has to
+	// put the occupancy line back while it stays open.
+	m = press(m, pinSlotKey('0'))
+
+	require.True(t, m.pinning)
+	assert.Contains(t, m.status, "[1]alpha")
+}
+
+func TestCtrlG_OutOfRangeDigitStaysInPinMode(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 0, nil }, nil)
+	m = press(m, ctrlG)
+
+	result, cmd := m.Update(pinSlotKey('0'))
+	m = result.(Model)
+
+	assert.True(t, m.pinning, "a digit outside the offered range must keep pin mode open")
+	assert.Nil(t, cmd)
+	assert.Contains(t, m.status, "1-9", "the status explains the valid range")
+}
+
+func TestCtrlG_NothingHighlighted(t *testing.T) {
+	called := false
+	m := newHarpoonModel(func(string, int) (int, error) {
+		called = true
+		return 0, nil
+	}, occupancySlots)
+	m.filterInput.SetValue("zzzzzzz")
+	m.applyFilter()
+	require.Empty(t, m.filtered)
+
+	result, cmd := m.Update(ctrlG)
+	m = result.(Model)
+
+	assert.Nil(t, cmd)
+	assert.False(t, called, "there is nothing to pin, so the backend is never called")
+	assert.Equal(t, "nothing to pin", m.status)
+	assert.False(t, m.pinning, "nothing to pin means pin mode is never entered")
+	assert.Equal(t, "", m.chosen)
+	assert.False(t, m.quit)
+}
+
+func TestCtrlG_ShowsTheError(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) {
+		return 0, errors.New("harpoon file is read-only")
+	}, nil)
+	m = press(m, ctrlG)
+
+	result, cmd := m.Update(pinSlotKey('1'))
+	m = result.(Model)
+	require.NotNil(t, cmd)
+	m = press(m, cmd())
+
+	assert.Contains(t, m.status, "Couldn't pin entry")
+	assert.Contains(t, m.status, "harpoon file is read-only")
+	assert.False(t, m.pinning, "a failed pin still leaves pin mode")
+}
+
+func TestCtrlG_EscCancelsPinModeWithoutPinning(t *testing.T) {
+	pinned := false
+	m := newHarpoonModel(func(string, int) (int, error) {
+		pinned = true
+		return 0, nil
+	}, nil)
+	m = press(m, ctrlG)
+	require.True(t, m.pinning)
+
+	result, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m = result.(Model)
+
+	assert.False(t, m.pinning)
+	assert.Nil(t, cmd)
+	assert.False(t, pinned, "esc must not write a pin")
+	assert.Empty(t, m.status)
+	assert.False(t, m.quit, "esc in pin mode must only cancel the mode")
+}
+
+func TestCtrlG_EnterCancelsPinModeWithoutAutoAssigning(t *testing.T) {
+	pinned := false
+	m := newHarpoonModel(func(string, int) (int, error) {
+		pinned = true
+		return 0, nil
+	}, occupancySlots)
+	m = press(m, ctrlG)
+
+	result, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = result.(Model)
+
+	assert.False(t, m.pinning)
+	assert.Nil(t, cmd)
+	assert.False(t, pinned, "enter must cancel rather than auto-assign a slot")
+	// Cancelling is silent: dismissing the prompt is the feedback, so the
+	// status line is left empty rather than announcing the cancel.
+	assert.Empty(t, m.status)
+}
+
+func TestCtrlG_CtrlCCancelsPinModeWithoutQuitting(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 0, nil }, nil)
+	m = press(m, ctrlG)
+	require.True(t, m.pinning)
+
+	result, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	m = result.(Model)
+
+	assert.False(t, m.pinning)
+	assert.Nil(t, cmd)
+	assert.False(t, m.quit, "ctrl+c in pin mode must cancel the mode, not kill the picker")
+	assert.Empty(t, m.status)
+}
+
+func TestCtrlG_NonDigitKeyCancelsAndReachesTheFilter(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 0, nil }, nil)
+	m = press(m, ctrlG)
+	require.True(t, m.pinning)
+
+	result, _ := m.Update(tea.KeyPressMsg{Code: 'd', Text: "d"})
+	m = result.(Model)
+
+	assert.False(t, m.pinning)
+	assert.Equal(t, "d", m.filterInput.Value(), "a non-digit key must fall through to the filter")
+}
+
+func TestCtrlG_DoesNotLeakIntoTheFilter(t *testing.T) {
+	m := newHarpoonModel(func(string, int) (int, error) { return 1, nil }, nil)
+	m.filterInput.SetValue("dot")
+	m.applyFilter()
+
+	result, _ := m.Update(ctrlG)
+	m = result.(Model)
+
+	assert.Equal(t, "dot", m.filterInput.Value(),
+		"a ctrl chord must never be typed as a literal into the filter")
+	assert.Len(t, m.filtered, 1)
+}
+
+func TestRealPicker_HarpoonFuncs(t *testing.T) {
+	add := func(name string, pos int) (int, error) { return pos, nil }
+	list := occupancySlots
+	p := NewPicker(model.Config{}, nil, nil, nil, nil, nil, add, list)
+
+	real, ok := p.(*RealPicker)
+	require.True(t, ok)
+	require.NotNil(t, real.harpoonAdd, "NewPicker must thread the pin func through")
+	require.NotNil(t, real.harpoonList, "NewPicker must thread the list func through")
+
+	pos, err := real.harpoonAdd("my-project", 2)
+	assert.NoError(t, err)
+	assert.Equal(t, 2, pos)
+
+	slots, err := real.harpoonList()
+	require.NoError(t, err)
+	require.Len(t, slots, 2)
+	assert.Equal(t, HarpoonSlot{Position: 1, Name: "alpha"}, slots[0])
+}

@@ -30,6 +30,7 @@ func NewRootCommand(version string) *cobra.Command {
 		NewPickerCommand(base),
 		NewWindowCommand(base),
 		NewWorktreeCommand(base),
+		NewHarpoonCommand(base),
 	)
 
 	return rootCmd
