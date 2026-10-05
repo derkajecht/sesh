@@ -68,12 +68,10 @@ type RealPicker struct {
 	// refreshCache refetches the session list into the cache after a removal.
 	// Nil when caching is off, which is also when there is nothing to refresh.
 	refreshCache CacheRefreshFunc
-	// harpoonAdd pins a session into the ordered harpoon list, returning its
-	// 1-indexed position. Nil leaves the pin key inert.
+	// harpoonAdd pins a session into the ordered harpoon list
 	harpoonAdd HarpoonAddFunc
 	// harpoonList reads the currently occupied harpoon slots so the pin prompt
-	// can show which positions are free. Nil means the prompt omits occupancy
-	// rather than failing.
+	// can show which positions are free
 	harpoonList HarpoonListFunc
 }
 
