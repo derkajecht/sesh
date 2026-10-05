@@ -60,9 +60,11 @@ type IconFunc func(session model.SeshSession) string
 // the event loop on every cursor move would make the picker feel sluggish.
 type PreviewFunc func(name string) (string, error)
 
-// sessionsLoadedMsg carries the result of the async fetch back to Update().
+// sessionsLoadedMsg carries the result of the async fetch back to Update. The
+// pinned map is the harpoon occupancy index
 type sessionsLoadedMsg struct {
 	sessions model.SeshSessions
+	pinned   map[string]int
 	err      error
 }
 
@@ -235,6 +237,8 @@ type Model struct {
 	pinSlots       []HarpoonSlot
 	pinSlotsLoaded bool
 	pinRebound     string
+	// pinned maps a session name to the harpoon slot it occupies, if any
+	pinned map[string]int
 
 	previewFunc     PreviewFunc
 	previewOn       bool
@@ -375,8 +379,21 @@ func chipCap(capStyle lipgloss.Style, glyph string, matched bool) string {
 
 // aliasMatchColor is the color matched alias runes are painted in. It is the
 // same green the matches in session names are drawn in, and under the chip's
-// reverse video it fills as a block of background rather than colored text.
+// reverse video it fills as a block of background rather than colored text
 var aliasMatchColor = lipgloss.ANSIColor(2)
+
+// pinBadgeColor paints the harpoon slot badge
+var pinBadgeColor = lipgloss.ANSIColor(5)
+
+// pinBadge renders the harpoon slot a session occupies as a compact `[N]`
+// beside its name, or "" when it isn't pinned
+func (m Model) pinBadge(name string) string {
+	pos, ok := m.pinned[name]
+	if !ok {
+		return ""
+	}
+	return " " + lipgloss.NewStyle().Foreground(pinBadgeColor).Render(fmt.Sprintf("[%d]", pos))
+}
 
 // indexFilterPrefix is the sigil that, typed first, enters index mode: the rows
 // are numbered and the next digit jumps straight to one of them.
@@ -463,8 +480,25 @@ func (m Model) Init() tea.Cmd {
 func (m Model) fetchSessions() tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := m.fetchFunc()
-		return sessionsLoadedMsg{sessions: sessions, err: err}
+		return sessionsLoadedMsg{sessions: sessions, pinned: m.loadPinned(), err: err}
 	}
+}
+
+// loadPinned reads the occupied harpoon slots into a name->position map for the
+// row badges
+func (m Model) loadPinned() map[string]int {
+	if m.harpoonList == nil {
+		return nil
+	}
+	slots, err := m.harpoonList()
+	if err != nil {
+		return nil
+	}
+	pinned := make(map[string]int, len(slots))
+	for _, slot := range slots {
+		pinned[slot.Name] = slot.Position
+	}
+	return pinned
 }
 
 // previewDebounce is how long a cursor position has to hold before its preview
@@ -680,6 +714,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		m.loading = false
+		m.pinned = msg.pinned
 		m.allItems = buildItems(msg.sessions, m.separatorAware, m.iconFunc)
 		m.applyFilter()
 		return m, m.schedulePreview()
@@ -703,9 +738,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = harpoonFailed(msg.err)
 			return m, nil
 		}
+		// Update the badges in place so the row shows its slot immediately
+		if m.pinned == nil {
+			m.pinned = make(map[string]int)
+		}
 		if rebound != "" {
-			// The chosen slot held someone else, so the wording has to say the
-			// old binding was displaced rather than that slot was empty.
+			// The chosen slot held someone else, so that row loses its badge.
+			delete(m.pinned, rebound)
+		}
+		m.pinned[msg.name] = msg.position
+		if rebound != "" {
+			// The wording has to say the old binding was displaced rather than
+			// that the slot was empty.
 			m.status = fmt.Sprintf("rebound slot %d: %q -> %q", msg.position, rebound, msg.name)
 			return m, nil
 		}
@@ -1332,18 +1376,19 @@ func (m Model) View() tea.View {
 			}
 			chip := m.aliasChip(item.item.name, item.chipMatchLen)
 			name := highlightMatches(item.item.name, item.matchedIndexes, matchStyle, normalStyle)
+			badge := m.pinBadge(item.item.name)
 
 			var windows string
 			if m.showWindows {
 				// Window names are display-only: they are never highlighted as
 				// matches and never become part of the selected value.
-				used := lipgloss.Width(prefix) + lipgloss.Width(tag) + lipgloss.Width(chip) + lipgloss.Width(item.item.name)
+				used := lipgloss.Width(prefix) + lipgloss.Width(tag) + lipgloss.Width(chip) + lipgloss.Width(item.item.name) + lipgloss.Width(badge)
 				if text := windowsText(item.item.session.WindowNames, m.contentWidth()-used); text != "" {
 					windows = windowStyle.Render(text)
 				}
 			}
 
-			b.WriteString(fmt.Sprintf("%s%s%s%s%s\n", prefix, tag, chip, name, windows))
+			fmt.Fprintf(&b, "%s%s%s%s%s%s\n", prefix, tag, chip, name, badge, windows)
 		}
 
 		// Pad remaining visible lines

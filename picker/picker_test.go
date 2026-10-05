@@ -2174,11 +2174,11 @@ func TestGroupSeparator_ScrollCountsTheRule(t *testing.T) {
 
 // --- harpoon pin ------------------------------------------------------------
 
-// ctrlG is the harpoon pin binding as the terminal delivers it.
+// ctrlG is the harpoon pin binding
 var ctrlG = tea.KeyPressMsg{Code: 'g', Mod: tea.ModCtrl}
 
 // newHarpoonModel loads the test sessions with the given pin and list funcs
-// wired in. Either may be nil to model a picker built without that half.
+// wired in
 func newHarpoonModel(add HarpoonAddFunc, list HarpoonListFunc) Model {
 	sessions := testSessions()
 	m := New(testFetchFunc(sessions), testOptionsWith(func(o *Options) {
@@ -2189,12 +2189,11 @@ func newHarpoonModel(add HarpoonAddFunc, list HarpoonListFunc) Model {
 	return result.(Model)
 }
 
-// pinSlotKey is a slot digit as the terminal delivers it.
 func pinSlotKey(digit rune) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: digit, Text: string(digit)}
 }
 
-// occupancySlots is a small occupied-slot list used across the pin tests.
+// occupancySlots is a small occupied-slot list used across the pin tests
 func occupancySlots() ([]HarpoonSlot, error) {
 	return []HarpoonSlot{{Position: 1, Name: "alpha"}, {Position: 3, Name: "gamma"}}, nil
 }
@@ -2491,4 +2490,101 @@ func TestRealPicker_HarpoonFuncs(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, slots, 2)
 	assert.Equal(t, HarpoonSlot{Position: 1, Name: "alpha"}, slots[0])
+}
+
+// --- harpoon badges ---------------------------------------------------------
+
+// pinTestSlots pins two of the test sessions, by name, to distinct slots.
+func pinTestSlots() ([]HarpoonSlot, error) {
+	return []HarpoonSlot{{Position: 1, Name: "my-project"}, {Position: 3, Name: "dotfiles"}}, nil
+}
+
+// loadedHarpoonModel builds the harpoon model and loads it through
+// fetchSessions
+func loadedHarpoonModel(add HarpoonAddFunc, list HarpoonListFunc) Model {
+	m := newHarpoonModel(add, list)
+	msg := m.fetchSessions()()
+	result, _ := m.Update(msg)
+	m = result.(Model)
+	m.width = 80
+	m.height = 24
+	return m
+}
+
+func TestView_PinnedSessionShowsItsSlot(t *testing.T) {
+	m := loadedHarpoonModel(func(string, int) (int, error) { return 0, nil }, pinTestSlots)
+
+	assert.Contains(t, iconRow(t, m, "my-project"), "[1]",
+		"a session in slot 1 shows its number")
+	assert.Contains(t, iconRow(t, m, "dotfiles"), "[3]",
+		"a session in slot 3 shows its number")
+}
+
+func TestView_UnpinnedSessionShowsNoBadge(t *testing.T) {
+	m := loadedHarpoonModel(func(string, int) (int, error) { return 0, nil }, pinTestSlots)
+
+	assert.NotContains(t, iconRow(t, m, "notes"), "[",
+		"a session with no harpoon slot shows no badge")
+}
+
+func TestCtrlG_PinShowsTheBadgeWithoutARefetch(t *testing.T) {
+	// occupancySlots names sessions the test list doesn't have, so nothing is
+	// badged until the pin reports back.
+	m := loadedHarpoonModel(func(string, int) (int, error) { return 2, nil }, occupancySlots)
+	require.NotContains(t, ansi.Strip(m.View().Content), "[2]", "nothing is pinned yet")
+
+	m.cursor = 0 // my-project
+	m = press(m, ctrlG)
+	result, cmd := m.Update(pinSlotKey('2'))
+	m = result.(Model)
+	require.NotNil(t, cmd)
+	m = press(m, cmd())
+	// The pin status names the session too, so retire it to read only the row.
+	m.status = ""
+
+	assert.Equal(t, 2, m.pinned["my-project"])
+	assert.Contains(t, iconRow(t, m, "my-project"), "[2]",
+		"the badge appears as soon as the pin reports back")
+}
+
+func TestCtrlG_ReboundMovesTheBadge(t *testing.T) {
+	list := func() ([]HarpoonSlot, error) {
+		return []HarpoonSlot{{Position: 3, Name: "dotfiles"}}, nil
+	}
+	m := loadedHarpoonModel(func(string, int) (int, error) { return 3, nil }, list)
+	require.Contains(t, iconRow(t, m, "dotfiles"), "[3]")
+
+	// Pin the first row over the slot dotfiles already holds.
+	m.cursor = 0 // my-project
+	m = press(m, ctrlG)
+	result, cmd := m.Update(pinSlotKey('3'))
+	m = result.(Model)
+	require.NotNil(t, cmd)
+	m = press(m, cmd())
+	// The rebound status names both sessions, so retire it to read the rows.
+	m.status = ""
+
+	assert.Equal(t, 3, m.pinned["my-project"], "the chosen slot moves to the new session")
+	_, still := m.pinned["dotfiles"]
+	assert.False(t, still, "the displaced session loses its slot")
+	assert.Contains(t, iconRow(t, m, "my-project"), "[3]")
+	assert.NotContains(t, iconRow(t, m, "dotfiles"), "[3]")
+}
+
+func TestView_NilHarpoonListShowsNoBadges(t *testing.T) {
+	m := loadedHarpoonModel(func(string, int) (int, error) { return 0, nil }, nil)
+
+	assert.Nil(t, m.pinned, "no list means nothing is known to be pinned")
+	for _, name := range []string{"my-project", "dotfiles", "notes"} {
+		assert.NotContains(t, iconRow(t, m, name), "[",
+			"%s must render without a badge", name)
+	}
+}
+
+func TestFetchSessions_HarpoonListErrorShowsNoBadges(t *testing.T) {
+	m := loadedHarpoonModel(func(string, int) (int, error) { return 0, nil },
+		func() ([]HarpoonSlot, error) { return nil, errors.New("tmux unavailable") })
+
+	assert.Empty(t, m.pinned, "a failed read is treated as nothing pinned")
+	assert.NotContains(t, iconRow(t, m, "my-project"), "[")
 }

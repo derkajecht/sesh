@@ -10,30 +10,26 @@ import (
 	"github.com/joshmedeski/sesh/v2/tmux"
 )
 
-// OptionName is the tmux global user option that backs the pinned list. It
-// lives in the tmux server's memory, so it dies with `tmux kill-server`.
+// OptionName is the tmux global user option that backs the pinned list. Dies on tmux kill-server
 const OptionName = "@sesh_harpoon"
 
-// Slot is one numbered position in sesh-harpoon. A vacant slot has an empty
-// Name; positions are never renumbered, so a slot keeps its identity for the
+// Slot is one numbered position in sesh-harpoon.
+// Positions are never renumbered, so a slot keeps its identity for the
 // lifetime of the tmux server.
 type Slot struct {
 	Position int
 	Name     string
 }
 
-// Harpoon is an ordered, user-addressed list of session names stored in a tmux
-// global user option. Positions are 1-indexed everywhere because they are what
-// the user types and what keybinds encode. Positions are stable: a keybind to
-// slot N always triggers the session in slot N, so removing a slot leaves a hole and
-// never shifts its neighbours down.
+// Positions are 1-indexed everywhere
+// Positions are stable: a keybind to slot N always triggers the session stored in slot N
 type Harpoon interface {
-	// List returns only occupied slots, sorted by position. Vacant positions are absent.
+	// List returns only occupied slots, sorted by position
 	List() ([]Slot, error)
 	// Add pins session name at the exact index position, returning pos. If the
-	// position is already occupied it is REBOUND to the new name.
+	// position is already occupied it is rebound to the new name.
 	Add(name string, pos int) (int, error)
-	// Remove vacates position, leaving a hole. Other positions are untouched.
+	// Remove vacates a position. Other positions are untouched.
 	Remove(position int) error
 	// Get returns the session name at the position, or an error if the slot is vacant.
 	Get(position int) (string, error)
@@ -47,6 +43,14 @@ func NewHarpoon(t tmux.Tmux) Harpoon {
 	return &RealHarpoon{tmux: t}
 }
 
+func (h *RealHarpoon) getSlots() ([]Slot, error) {
+	slots, err := h.readSlots()
+	if err != nil {
+		return nil, fmt.Errorf("harpoon: %w", err)
+	}
+	return slots, nil
+}
+
 // parse decodes the option value into slots.
 func parse(raw string) []Slot {
 	if raw == "" {
@@ -57,8 +61,7 @@ func parse(raw string) []Slot {
 		if line == "" {
 			continue
 		}
-		// Split on the FIRST colon only: session names may legitimately
-		// contain colons, and only the leading position field is structural.
+		// Split on the first colon only
 		posField, name, ok := strings.Cut(line, ":")
 		if !ok {
 			slog.Warn("harpoon: ignoring malformed slot line", "line", line)
@@ -99,8 +102,7 @@ func serialize(slots []Slot) string {
 }
 
 // maxPosition reports the highest occupied position, or 0 when the list is
-// empty. It is what distinguishes a "vacant" hole inside the list from a
-// position that never existed at all.
+// empty.
 func maxPosition(slots []Slot) int {
 	max := 0
 	for _, s := range slots {
@@ -121,10 +123,7 @@ func (h *RealHarpoon) readSlots() ([]Slot, error) {
 }
 
 // write persists the complete list in one set-option call.
-// tmux's append flag (`set-option -a`) concatenates values with no separator,
-// so adding "alpha" then "beta" yields "alphabeta". tmux has no separator-aware
-// list append, so read-modify-write with replace semantics is the only correct
-// approach. An empty slice writes "", which reads back as zero slots.
+// An empty slice writes "", which reads back as zero slots.
 func (h *RealHarpoon) write(slots []Slot) error {
 	if _, err := h.tmux.SetOption(OptionName, serialize(slots)); err != nil {
 		return fmt.Errorf("writing tmux option %s: %w", OptionName, err)
@@ -133,10 +132,7 @@ func (h *RealHarpoon) write(slots []Slot) error {
 }
 
 func (h *RealHarpoon) List() ([]Slot, error) {
-	slots, err := h.readSlots()
-	if err != nil {
-		return nil, fmt.Errorf("harpoon list: %w", err)
-	}
+	slots, _ := h.getSlots()
 	return slots, nil
 }
 
@@ -149,10 +145,7 @@ func (h *RealHarpoon) Add(name string, pos int) (int, error) {
 	if strings.TrimSpace(name) == "" {
 		return 0, fmt.Errorf("harpoon add: session name must not be blank")
 	}
-	slots, err := h.readSlots()
-	if err != nil {
-		return 0, fmt.Errorf("harpoon add: %w", err)
-	}
+	slots, _ := h.getSlots()
 	rebound := false
 	// overwrite session at the given index if position is already taken
 	for i := range slots {
@@ -177,10 +170,8 @@ func (h *RealHarpoon) Add(name string, pos int) (int, error) {
 // A slot that dies on its own does not trigger this. Nothing here prunes or
 // compacts, so a killed session keeps its slot.
 func (h *RealHarpoon) Remove(position int) error {
-	slots, err := h.readSlots()
-	if err != nil {
-		return fmt.Errorf("harpoon remove: %w", err)
-	}
+	slots, _ := h.getSlots()
+
 	if position < 1 || position > maxPosition(slots) {
 		return fmt.Errorf("harpoon remove: no slot at position %d", position)
 	}
@@ -203,14 +194,10 @@ func (h *RealHarpoon) Remove(position int) error {
 	return nil
 }
 
-// Get returns the session name at the index position. A position inside the
-// list that has no name is reported as vacant; a position beyond the highest
-// used slot is reported as never having existed.
+// Get returns the session name at the index position.
 func (h *RealHarpoon) Get(position int) (string, error) {
-	slots, err := h.readSlots()
-	if err != nil {
-		return "", fmt.Errorf("harpoon get: %w", err)
-	}
+	slots, _ := h.getSlots()
+
 	if position < 1 || position > maxPosition(slots) {
 		return "", fmt.Errorf("harpoon get: no slot at position %d", position)
 	}
